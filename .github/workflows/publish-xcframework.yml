@@ -155,7 +155,7 @@ jobs:
                 if-no-files-found: error
 
   assemble-artifactbundle:
-      name: Assemble ${{ env.FRAMEWORK_NAME }}.artifactbundle
+      name: Assemble Artifact Bundle
       needs: apple-build
       runs-on: macos-latest
       steps:
