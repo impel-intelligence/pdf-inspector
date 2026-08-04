@@ -2,7 +2,8 @@ name: Publish XCFramework
 
 on:
   push:
-    branches: [main]
+    tags:
+      - '*'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +20,7 @@ jobs:
       name: Build Apple slices
       runs-on: macos-latest
       env:
-        TARGETS: "aarch64-apple-ios,aarch64-apple-ios-macabi,aarch64-apple-ios-sim,aarch64-apple-tvos,aarch64-apple-tvos-sim,aarch64-apple-visionos,aarch64-apple-visionos-sim,aarch64-apple-watchos,aarch64-apple-watchos-sim,x86_64-apple-ios,x86_64-apple-ios-macabi"
+        TARGETS: "aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-macabi,aarch64-apple-ios-sim,aarch64-apple-tvos,aarch64-apple-tvos-sim,aarch64-apple-visionos,aarch64-apple-visionos-sim,aarch64-apple-watchos,aarch64-apple-watchos-sim,x86_64-apple-ios,x86_64-apple-ios-macabi"
 
       steps:
           - uses: actions/checkout@v4
@@ -62,7 +63,7 @@ jobs:
 
           # Most of our targets are all for separate architectures, however the iOS Simulator and Mac Catalyst have multiple targets
           # for a single architecture. Combine those into a single slice here.
-          - name: Create multi-arch slices (iOS Simulator & Mac Catalyst)
+          - name: Create multi-arch slices (macOS & iOS Simulator & Mac Catalyst)
             run: |
               mkdir -p target/apple/multi/ios-simulator target/apple/multi/ios-macabi
               lipo -create \
@@ -73,13 +74,18 @@ jobs:
                 "target/aarch64-apple-ios-macabi/release/${LIB_NAME}.a" \
                 "target/x86_64-apple-ios-macabi/release/${LIB_NAME}.a" \
                 -output "target/apple/multi/ios-macabi/${LIB_NAME}.a"
+              lipo -create \
+                "target/aarch64-apple-darwin/release/${LIB_NAME}.a" \
+                "target/x86_64-apple-darwin/release/${LIB_NAME}.a" \
+                -output "target/apple/multi/macos/${LIB_NAME}.a"
 
           - name: Assemble ${{ env.FRAMEWORK_NAME }}.xcframework
             run: |
               SLICES=(
-                "target/aarch64-apple-ios/release/${LIB_NAME}.a"
+                "target/apple/multi/macos/${LIB_NAME}.a"
                 "target/apple/multi/ios-simulator/${LIB_NAME}.a"
                 "target/apple/multi/ios-macabi/${LIB_NAME}.a"
+                "target/aarch64-apple-ios/release/${LIB_NAME}.a"
                 "target/aarch64-apple-tvos/release/${LIB_NAME}.a"
                 "target/aarch64-apple-tvos-sim/release/${LIB_NAME}.a"
                 "target/aarch64-apple-visionos/release/${LIB_NAME}.a"
@@ -111,3 +117,12 @@ jobs:
                     swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip
                     swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip.checksum
                 if-no-files-found: error
+
+          # If we are on a tag, create a release with the xcode files so they can be taken in by SPM
+          - name: Release
+            uses: softprops/action-gh-release@v3
+            if: github.ref_type == 'tag'
+            with:
+              files: |
+                  swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip
+                  swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip.checksum
