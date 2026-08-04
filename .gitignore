@@ -43,3 +43,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 /.swiftpm
+/swift/pdf_inspector.artifactbundle
