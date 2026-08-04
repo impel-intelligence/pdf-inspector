@@ -1,13 +1,19 @@
-name: Publish XCFramework
+name: Publish Swift artifact bundle
 
+# Deliberately triggered by a NON-semver `pdf-inspector-rust-*` tag, never a
+# plain `X.Y.Z` one. SwiftPM parses tags via `Version(tag:)` and skips anything
+# that isn't semver, so these artifact tags stay invisible to package
+# resolution. The release must be published under one of these tags BEFORE the
+# matching semver tag is cut, otherwise a client could resolve a version whose
+# Package.swift references a release that doesn't exist yet.
 on:
   push:
     tags:
-      - '*'
+      - 'pdf-inspector-rust-*'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 env:
@@ -153,7 +159,12 @@ jobs:
       needs: apple-build
       runs-on: macos-latest
       steps:
+          # Full history: the commit step below pushes to a branch, and pushing
+          # from the default shallow clone can be rejected ("shallow update not
+          # allowed").
           - uses: actions/checkout@v4
+            with:
+              fetch-depth: 0
 
           - name: Download Apple slices
             uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -210,7 +221,29 @@ jobs:
               zip -r -y $FRAMEWORK_NAME.artifactbundle.zip $FRAMEWORK_NAME.artifactbundle
 
           - name: Compute checksum for Package.swift binaryTarget
-            run: echo $(swift package compute-checksum swift/$FRAMEWORK_NAME.artifactbundle.zip) > ${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum
+            id: checksum
+            run: |
+              CHECKSUM=$(swift package compute-checksum "swift/${FRAMEWORK_NAME}.artifactbundle.zip")
+              echo "$CHECKSUM" > "swift/${FRAMEWORK_NAME}.artifactbundle.zip.checksum"
+              echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+
+              VERSION=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')
+              URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/pdf-inspector-rust-${VERSION}/${FRAMEWORK_NAME}.artifactbundle.zip"
+
+              # Surface the two values that have to be pasted into Package.swift
+              # by hand before the matching semver tag is cut.
+              {
+                echo "### Package.swift binaryTarget"
+                echo
+                echo 'Update `Package.swift`, commit, then tag `'"${VERSION}"'`:'
+                echo
+                echo '```swift'
+                echo "let artifactBundleVersion = \"${VERSION}\""
+                echo "let artifactBundleChecksum = \"${CHECKSUM}\""
+                echo '```'
+                echo
+                echo "Resolved URL: \`${URL}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
 
           - name: Upload artifact bundle
             uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -221,11 +254,72 @@ jobs:
                     swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum
                 if-no-files-found: error
 
-          # If we are on a tag, create a release with the artifact bundle so it can be taken in by SPM
+          # Publishes under the pdf-inspector-rust-* tag that triggered this run.
+          # This release must exist before the matching semver tag is pushed —
+          # see the trigger comment at the top of this file.
           - name: Release
             uses: softprops/action-gh-release@v3
             if: github.ref_type == 'tag'
             with:
+              name: PDF Inspector Rust artifactbundle ${{ github.ref_name }}
+              body: |
+                Rust artifact bundle for the Swift package.
+
+                `Package.swift` binaryTarget checksum:
+
+                ```
+                ${{ steps.checksum.outputs.checksum }}
+                ```
               files: |
                   swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip
                   swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum
+
+          # Runs only after the release above succeeded, so Package.swift is
+          # never pointed at a release that doesn't exist. Commits onto
+          # PACKAGE_BRANCH (not the tag — tags are detached), which means the
+          # semver tag you cut afterwards must be on this new commit:
+          #
+          #   git pull && git tag <version> && git push --tags
+          #
+          # The regenerated Swift bindings are committed alongside so the
+          # checked-in wrapper always matches the binary that was just released.
+          - name: Commit pinned Package.swift and regenerated bindings
+            if: github.ref_type == 'tag'
+            env:
+              PACKAGE_BRANCH: main
+              CHECKSUM: ${{ steps.checksum.outputs.checksum }}
+            run: |
+              set -euo pipefail
+
+              VERSION=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')
+
+              # stage/ is untracked, so the freshly generated bindings survive
+              # the branch switch below.
+              git fetch origin "$PACKAGE_BRANCH"
+              git checkout -B "$PACKAGE_BRANCH" "origin/${PACKAGE_BRANCH}"
+
+              cp stage/pdf_inspector.swift swift/pdf_inspector.swift
+              sed -i '' -E \
+                -e "s|^let artifactBundleVersion = \".*\"|let artifactBundleVersion = \"${VERSION}\"|" \
+                -e "s|^let artifactBundleChecksum = \".*\"|let artifactBundleChecksum = \"${CHECKSUM}\"|" \
+                Package.swift
+
+              # sed silently no-ops if the anchors ever drift; fail loudly
+              # rather than pushing a manifest with a stale checksum.
+              grep -qF "let artifactBundleVersion = \"${VERSION}\"" Package.swift
+              grep -qF "let artifactBundleChecksum = \"${CHECKSUM}\"" Package.swift
+
+              if git diff --quiet -- Package.swift swift/pdf_inspector.swift; then
+                echo "Package.swift and bindings already up to date; nothing to commit."
+                exit 0
+              fi
+
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add Package.swift swift/pdf_inspector.swift
+              git commit -m "chore(swift): pin artifact bundle ${VERSION}
+
+              Generated by ${GITHUB_WORKFLOW} for tag ${GITHUB_REF_NAME}."
+              git push origin "$PACKAGE_BRANCH"
+
+              echo "Committed to ${PACKAGE_BRANCH}. Now: git pull && git tag ${VERSION} && git push --tags" >> "$GITHUB_STEP_SUMMARY"
