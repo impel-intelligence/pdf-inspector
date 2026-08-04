@@ -12,6 +12,7 @@ let package = Package(
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(name: "PDFInspector", targets: ["PDFInspector"]),
+        .library(name: "pdf_inspectorFFI", targets: ["pdf_inspector"]),
     ],
     targets: [
         // Common
