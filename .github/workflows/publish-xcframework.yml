@@ -108,50 +108,74 @@ jobs:
                   "target/x86_64-apple-ios-macabi/release/${LIB_NAME}.a" \
                   -output "target/apple/multi/ios-macabi/${LIB_NAME}.a"
 
-          - name: Assemble ${{ env.FRAMEWORK_NAME }}.xcframework
+          # Each entry is "bundle-subdir|source .a path|comma-separated SwiftPM
+          # destination triples". SwiftPM triples are NOT Rust target triples
+          # (note "macosx" not "macos", "-simulator" not "-sim", "xros" for
+          # visionOS). macOS/iOS-device/iOS-simulator/Catalyst are confirmed
+          # against a working SE-0482 artifact bundle; tvOS/watchOS/visionOS
+          # are confirmed against LLVM's canonical triple table (rust-lang/
+          # cc-rs's generated.rs) plus independent corroboration from
+          # swiftlang/swift, Kotlin/Native, and LLDB.
+          - name: Assemble ${{ env.FRAMEWORK_NAME }}.artifactbundle
             run: |
-              SLICES=(
-                "target/apple/multi/macos/${LIB_NAME}.a"
-                "target/apple/multi/ios-simulator/${LIB_NAME}.a"
-                "target/apple/multi/ios-macabi/${LIB_NAME}.a"
-                "target/aarch64-apple-ios/release/${LIB_NAME}.a"
-                "target/aarch64-apple-tvos/release/${LIB_NAME}.a"
-                "target/aarch64-apple-tvos-sim/release/${LIB_NAME}.a"
-                "target/aarch64-apple-visionos/release/${LIB_NAME}.a"
-                "target/aarch64-apple-visionos-sim/release/${LIB_NAME}.a"
-                "target/aarch64-apple-watchos/release/${LIB_NAME}.a"
-                "target/aarch64-apple-watchos-sim/release/${LIB_NAME}.a"
+              VERSION=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')
+              BUNDLE="swift/${FRAMEWORK_NAME}.artifactbundle"
+
+              rm -rf "$BUNDLE"
+              mkdir -p "$BUNDLE/include"
+              cp target/apple/headers/pdf_inspectorFFI.h "$BUNDLE/include/"
+              cp target/apple/headers/module.modulemap "$BUNDLE/include/"
+
+              MANIFEST=(
+                "macos|target/apple/multi/macos/${LIB_NAME}.a|arm64-apple-macosx,x86_64-apple-macosx"
+                "ios|target/aarch64-apple-ios/release/${LIB_NAME}.a|arm64-apple-ios"
+                "ios-simulator|target/apple/multi/ios-simulator/${LIB_NAME}.a|arm64-apple-ios-simulator,x86_64-apple-ios-simulator"
+                "ios-macabi|target/apple/multi/ios-macabi/${LIB_NAME}.a|arm64-apple-ios-macabi,x86_64-apple-ios-macabi"
+                "tvos|target/aarch64-apple-tvos/release/${LIB_NAME}.a|arm64-apple-tvos"
+                "tvos-simulator|target/aarch64-apple-tvos-sim/release/${LIB_NAME}.a|arm64-apple-tvos-simulator"
+                "visionos|target/aarch64-apple-visionos/release/${LIB_NAME}.a|arm64-apple-xros"
+                "visionos-simulator|target/aarch64-apple-visionos-sim/release/${LIB_NAME}.a|arm64-apple-xros-simulator"
+                "watchos|target/aarch64-apple-watchos/release/${LIB_NAME}.a|arm64-apple-watchos"
+                "watchos-simulator|target/aarch64-apple-watchos-sim/release/${LIB_NAME}.a|arm64-apple-watchos-simulator"
               )
 
-              XCFRAMEWORK_ARGS=()
-              for lib in "${SLICES[@]}"; do
-                  XCFRAMEWORK_ARGS+=("-library" "$lib" "-headers" "target/apple/headers")
+              rm -f /tmp/artifactbundle-manifest.tsv
+              for entry in "${MANIFEST[@]}"; do
+                  dir="${entry%%|*}"
+                  rest="${entry#*|}"
+                  src="${rest%%|*}"
+                  triples="${rest#*|}"
+
+                  mkdir -p "$BUNDLE/$dir"
+                  cp "$src" "$BUNDLE/$dir/${LIB_NAME}.a"
+                  printf '%s\t%s\t%s\n' "$dir" "${LIB_NAME}.a" "$triples" >> /tmp/artifactbundle-manifest.tsv
               done
 
-              xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output swift/$FRAMEWORK_NAME.xcframework
+              python3 scripts/generate-artifactbundle-info.py \
+                "$FRAMEWORK_NAME" "$VERSION" /tmp/artifactbundle-manifest.tsv "$BUNDLE/info.json"
 
-          - name: Zip xcframework for distribution
+          - name: Zip artifact bundle for distribution
             run: |
               cd swift
-              zip -r -y $FRAMEWORK_NAME.xcframework.zip $FRAMEWORK_NAME.xcframework
+              zip -r -y $FRAMEWORK_NAME.artifactbundle.zip $FRAMEWORK_NAME.artifactbundle
 
           - name: Compute checksum for Package.swift binaryTarget
-            run: echo $(swift package compute-checksum swift/$FRAMEWORK_NAME.xcframework.zip) > ${{ env.FRAMEWORK_NAME }}.xcframework.zip.checksum
+            run: echo $(swift package compute-checksum swift/$FRAMEWORK_NAME.artifactbundle.zip) > ${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum
 
           - name: Upload Apple build artifact
             uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
             with:
                 name: apple-build
                 path: |
-                    swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip
-                    swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip.checksum
+                    swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip
+                    swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum
                 if-no-files-found: error
 
-          # If we are on a tag, create a release with the xcode files so they can be taken in by SPM
+          # If we are on a tag, create a release with the artifact bundle so it can be taken in by SPM
           - name: Release
             uses: softprops/action-gh-release@v3
             if: github.ref_type == 'tag'
             with:
               files: |
-                  swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip
-                  swift/${{ env.FRAMEWORK_NAME }}.xcframework.zip.checksum
+                  swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip
+                  swift/${{ env.FRAMEWORK_NAME }}.artifactbundle.zip.checksum

@@ -13,23 +13,20 @@ let package = Package(
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(name: "PDFInspector", targets: ["PDFInspector"]),
     ],
-    dependencies: [
-
-    ],
     targets: [
         // Common
         .target(
             name: "PDFInspector",
-            path: "swift/",
             dependencies: [
                 "pdf_inspector"
-            ]
+            ],
+            path: "swift/"
         ),
 
         // PDF Inspector Package
         .binaryTarget(
             name: "pdf_inspector",
-            path: "pdf_inspector.xcframework"
+            path: "swift/pdf_inspector.artifactbundle"
         ),
     ]
 )
