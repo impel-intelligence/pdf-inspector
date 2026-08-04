@@ -14,6 +14,11 @@ env:
   CARGO_TERM_COLOR: always
   FRAMEWORK_NAME: pdf_inspector
   LIB_NAME: libpdf_inspector
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
+  IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+  TVOS_DEPLOYMENT_TARGET: "18.0"
+  WATCHOS_DEPLOYMENT_TARGET: "11.0"
+  XROS_DEPLOYMENT_TARGET: "2.0"
 
 jobs:
   apple-build:
@@ -62,22 +67,46 @@ jobs:
               rm -f swift/pdf_inspectorFFI.h swift/pdf_inspectorFFI.modulemap
 
           # Most of our targets are all for separate architectures, however the iOS Simulator and Mac Catalyst have multiple targets
-          # for a single architecture. Combine those into a single slice here.
+          # for a single architecture. Combine those into a single slice here. Re-merge each macOS slice through ld -r so Xcode 26
+          # gets LC_BUILD_VERSION (not the deprecated LC_VERSION_MIN_MACOSX) and classifies the slice as arm64e-compatible on
+          # Apple Silicon hosts.
           - name: Create multi-arch slices (macOS & iOS Simulator & Mac Catalyst)
             run: |
-              mkdir -p target/apple/multi/ios-simulator target/apple/multi/ios-macabi
-              lipo -create \
-                "target/aarch64-apple-ios-sim/release/${LIB_NAME}.a" \
-                "target/x86_64-apple-ios/release/${LIB_NAME}.a" \
-                -output "target/apple/multi/ios-simulator/${LIB_NAME}.a"
-              lipo -create \
-                "target/aarch64-apple-ios-macabi/release/${LIB_NAME}.a" \
-                "target/x86_64-apple-ios-macabi/release/${LIB_NAME}.a" \
-                -output "target/apple/multi/ios-macabi/${LIB_NAME}.a"
-              lipo -create \
-                "target/aarch64-apple-darwin/release/${LIB_NAME}.a" \
-                "target/x86_64-apple-darwin/release/${LIB_NAME}.a" \
-                -output "target/apple/multi/macos/${LIB_NAME}.a"
+                MACOS_SDK=$(xcrun --sdk macosx --show-sdk-version)
+                REPO_ROOT="$(pwd)"
+                mkdir -p target/apple/multi/ios-simulator target/apple/multi/ios-macabi target/apple/multi/macos
+
+                for arch in arm64 x86_64; do
+                  if [ "$arch" = "arm64" ]; then
+                    RUST_TARGET="aarch64-apple-darwin"
+                  else
+                    RUST_TARGET="x86_64-apple-darwin"
+                  fi
+                  workdir="$(mktemp -d)"
+                  (
+                    cd "$workdir"
+                    ar x "${REPO_ROOT}/target/${RUST_TARGET}/release/${LIB_NAME}.a"
+                    ld -r -S -arch "${arch}" \
+                      -platform_version macos "${MACOSX_DEPLOYMENT_TARGET}" "${MACOS_SDK}" \
+                      ./*.o -o merged.o
+                    libtool -static -o "${REPO_ROOT}/target/${RUST_TARGET}/release/${LIB_NAME}_merged.a" merged.o
+                  )
+                  rm -rf "$workdir"
+                done
+
+                lipo -create \
+                  "target/aarch64-apple-darwin/release/${LIB_NAME}_merged.a" \
+                  "target/x86_64-apple-darwin/release/${LIB_NAME}_merged.a" \
+                  -output "target/apple/multi/macos/${LIB_NAME}.a"
+
+                lipo -create \
+                  "target/aarch64-apple-ios-sim/release/${LIB_NAME}.a" \
+                  "target/x86_64-apple-ios/release/${LIB_NAME}.a" \
+                  -output "target/apple/multi/ios-simulator/${LIB_NAME}.a"
+                lipo -create \
+                  "target/aarch64-apple-ios-macabi/release/${LIB_NAME}.a" \
+                  "target/x86_64-apple-ios-macabi/release/${LIB_NAME}.a" \
+                  -output "target/apple/multi/ios-macabi/${LIB_NAME}.a"
 
           - name: Assemble ${{ env.FRAMEWORK_NAME }}.xcframework
             run: |
